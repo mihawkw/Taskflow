@@ -4,7 +4,12 @@ import react from '@vitejs/plugin-react';
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // 设置 base 为 './' 使得所有资源路径变为相对路径
-  // 这样无论部署在 /taskflow 还是其他子路径下都能正常加载
+  // 关键配置：设置为相对路径，适配 GitHub Pages 的子目录部署
   base: './', 
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets',
+    // 避免部分浏览器对过大文件的警告，虽然不影响运行
+    chunkSizeWarningLimit: 1000,
+  }
 });
