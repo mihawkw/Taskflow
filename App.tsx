@@ -128,6 +128,10 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
 
+  // Computed live tasks (to ensure modals get fresh data)
+  const liveActiveTask = activeTask ? tasks.find(t => t.id === activeTask.id) || activeTask : null;
+  const liveDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
+
   // Persistence
   useEffect(() => {
     localStorage.setItem(`tf_${username}_tasks`, JSON.stringify(tasks));
@@ -141,51 +145,83 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
     localStorage.setItem(`tf_${username}_global_notif`, String(globalNotifications));
   }, [globalNotifications, username]);
 
-  // Notification Engine
-  useEffect(() => {
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
+  // Notification Logic
+  const handleToggleGlobalNotifications = async () => {
+    if (!globalNotifications) {
+      // Trying to enable
+      if (!("Notification" in window)) {
+        alert("您的浏览器不支持通知功能。");
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission === "granted") {
+        setGlobalNotifications(true);
+        // Send a test notification immediately to confirm it works
+        try {
+          new Notification("TaskFlow Pro", { body: "提醒功能已开启！我们将按计划提醒您。" });
+        } catch (e) {
+          console.error("Test notification failed", e);
+        }
+      } else {
+        alert("无法开启提醒。请在浏览器设置中允许通知权限。");
+        setGlobalNotifications(false);
+      }
+    } else {
+      setGlobalNotifications(false);
     }
-  }, []);
+  };
 
   useEffect(() => {
     const checkReminders = () => {
+      // 1. Basic checks
       if (!globalNotifications || Notification.permission !== 'granted') return;
 
       const now = Date.now();
       let hasUpdates = false;
-      const nextTasks = tasks.map(task => {
-        if (task.type !== 'habit' || !task.notificationEnabled || task.isCompleted) return task;
 
-        const taskLogs = logs.filter(l => String(l.taskId) === String(task.id));
-        const lastActivity = taskLogs.length > 0 
-          ? Math.max(...taskLogs.map(l => l.timestamp)) 
-          : task.createdAt;
+      // 2. Iterate and update tasks
+      // Using functional update to ensure we don't have stale state inside interval
+      setTasks(currentTasks => {
+        const nextTasks = currentTasks.map(task => {
+          if (task.type !== 'habit' || !task.notificationEnabled || task.isCompleted) return task;
 
-        const freqMs = (task.frequency?.value || 1) * (UNIT_MS[task.frequency?.unit || 'day']);
+          const taskLogs = logs.filter(l => String(l.taskId) === String(task.id));
+          const lastActivity = taskLogs.length > 0 
+            ? Math.max(...taskLogs.map(l => l.timestamp)) 
+            : task.createdAt;
+
+          const freqMs = (task.frequency?.value || 1) * (UNIT_MS[task.frequency?.unit || 'day']);
+          
+          const timeSinceLastActivity = now - lastActivity;
+          const timeSinceLastNotified = task.lastNotifiedAt ? now - task.lastNotifiedAt : Infinity;
+
+          // Notify if: Time passed since action > Freq AND Time passed since last notification > Freq
+          if (timeSinceLastActivity >= freqMs && timeSinceLastNotified >= freqMs) {
+            try {
+               new Notification(`该行动了: ${task.title}`, {
+                body: `距离上次完成已过去很久了，加油！`,
+                icon: '/favicon.ico', // Optional: requires actual icon
+                tag: `task-${task.id}` // Prevent stacking too many of same type
+              });
+            } catch (e) {
+              console.error("Notification failed", e);
+            }
+            hasUpdates = true;
+            return { ...task, lastNotifiedAt: now };
+          }
+          return task;
+        });
         
-        const timeSinceLastActivity = now - lastActivity;
-        const timeSinceLastNotified = task.lastNotifiedAt ? now - task.lastNotifiedAt : Infinity;
-
-        if (timeSinceLastActivity >= freqMs && timeSinceLastNotified >= freqMs) {
-          new Notification(`任务提醒: ${task.title}`, {
-            body: `该进行 "${task.title}" 了！\n${username}，加油！`,
-            icon: '/favicon.ico'
-          });
-          hasUpdates = true;
-          return { ...task, lastNotifiedAt: now };
-        }
-        return task;
+        // Only return new array if something changed to prevent unnecessary re-renders
+        return hasUpdates ? nextTasks : currentTasks;
       });
-
-      if (hasUpdates) {
-        setTasks(nextTasks);
-      }
     };
 
-    const interval = setInterval(checkReminders, 30000); // Check every 30s
+    // Check every 10 seconds (more responsive than 30s)
+    const interval = setInterval(checkReminders, 10000); 
     return () => clearInterval(interval);
-  }, [tasks, logs, globalNotifications, username]);
+  }, [globalNotifications, logs, username]); // Removed 'tasks' from dependency to prevent interval reset loop
 
   const handleCreateOrUpdateTask = (taskData: Omit<Task, 'id' | 'createdAt' | 'isCompleted' | 'notificationEnabled'>) => {
     if (editingTask) {
@@ -194,9 +230,6 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
           ? { ...t, ...taskData } 
           : t
       ));
-      if (detailTask && String(detailTask.id) === String(editingTask.id)) {
-         setDetailTask(prev => prev ? { ...prev, ...taskData } : null);
-      }
       setEditingTask(null);
     } else {
       const newTask: Task = {
@@ -278,6 +311,7 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
     setDetailTask(null);
     setEditingTask(null);
     setIsFormOpen(false);
+    setActiveTask(null); // Ensure active task is cleared
     
     setTasks(prev => prev.filter(t => String(t.id) !== sId));
     setLogs(prev => prev.filter(l => String(l.taskId) !== sId));
@@ -404,7 +438,7 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
              ) : (
                  <div className="flex items-center gap-2">
                      <button 
-                        onClick={() => setGlobalNotifications(!globalNotifications)}
+                        onClick={handleToggleGlobalNotifications}
                         className={`p-2 rounded-full transition-all ${globalNotifications ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-400'}`}
                         title={globalNotifications ? '关闭提醒' : '开启提醒'}
                      >
@@ -540,20 +574,20 @@ const Dashboard: React.FC<DashboardProps> = ({ username, onLogout }) => {
           initialData={editingTask}
         />
         
-        {activeTask && (
+        {liveActiveTask && (
           <ActionModal
-            task={activeTask}
+            task={liveActiveTask}
             isOpen={!!activeTask}
             onClose={() => setActiveTask(null)}
             onSave={saveLog}
-            onToggleNotification={() => toggleTaskNotification(activeTask.id)}
+            onToggleNotification={() => toggleTaskNotification(liveActiveTask.id)}
           />
         )}
 
-        {detailTask && (
+        {liveDetailTask && (
           <DetailView
-            task={detailTask}
-            logs={logs.filter(l => String(l.taskId) === String(detailTask.id))}
+            task={liveDetailTask}
+            logs={logs.filter(l => String(l.taskId) === String(liveDetailTask.id))}
             onClose={() => setDetailTask(null)}
             onEdit={startEditing}
             onDelete={deleteTask}
