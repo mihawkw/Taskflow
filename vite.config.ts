@@ -9,7 +9,6 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
-    // 避免部分浏览器对过大文件的警告，虽然不影响运行
     chunkSizeWarningLimit: 1000,
   }
 });
